@@ -1,0 +1,194 @@
+# Kubernetes manifest for deploying litellm with PostgreSQL database on Rancher Desktop
+# To apply: kubectl apply -f this-file.yaml
+# To access:
+# - Use: curl -H "Host: litellm.localhost" http://localhost
+# - Or, add "127.0.0.1 litellm.localhost" to /etc/hosts and access http://litellm.localhost
+
+---
+# Namespace for organization
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: litellm-ns
+
+---
+# Secret for database password
+apiVersion: v1
+kind: Secret
+metadata:
+  name: litellm-db-secret
+  namespace: litellm-ns
+stringData:
+  password: "securethis"  # Replace with a secure password
+
+---
+# Persistent Volume Claim for database storage
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: litellm-db-pvc
+  namespace: litellm-ns
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+  storageClassName: local-path  # Default storage class in Rancher Desktop
+
+---
+# PostgreSQL Database Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: litellm-db-deployment
+  namespace: litellm-ns
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: litellm-db
+  template:
+    metadata:
+      labels:
+        app: litellm-db
+    spec:
+      containers:
+      - name: postgres
+        image: postgres:16
+        env:
+        - name: POSTGRES_USER
+          value: "llmproxy"
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: litellm-db-secret
+              key: password
+        - name: POSTGRES_DB
+          value: "litellm"
+        ports:
+        - containerPort: 5432
+        volumeMounts:
+        - name: data
+          mountPath: /var/lib/postgresql/data
+      volumes:
+      - name: data
+        persistentVolumeClaim:
+          claimName: litellm-db-pvc
+
+---
+# Database Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: litellm-db-service
+  namespace: litellm-ns
+spec:
+  selector:
+    app: litellm-db
+  ports:
+  - port: 5432
+    targetPort: 5432
+  type: ClusterIP
+
+---
+# Optional ConfigMap for litellm configuration
+# Create with: kubectl create configmap litellm-config --from-file=litellm-config.yaml -n litellm-ns
+# Example (uncomment and customize as needed):
+# apiVersion: v1
+# kind: ConfigMap
+# metadata:
+#   name: litellm-config
+#   namespace: litellm-ns
+# data:
+#   litellm-config.yaml: |
+#     model_list:
+#       - model_name: gpt-3.5-turbo
+#         litellm_params:
+#           model: gpt-3.5-turbo
+
+---
+# litellm Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: litellm-deployment
+  namespace: litellm-ns
+spec:
+  replicas: 5
+  selector:
+    matchLabels:
+      app: litellm
+  template:
+    metadata:
+      labels:
+        app: litellm
+    spec:
+      containers:
+      - name: litellm
+        image: ghcr.io/berriai/litellm:main-latest
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 4000
+        env:
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: litellm-db-secret
+              key: password
+        - name: DATABASE_URL
+          value: "postgresql://llmproxy:$(POSTGRES_PASSWORD)@litellm-db-service:5432/litellm"
+        - name: STORE_MODEL_IN_DB
+          value: "True"
+        - name: LITELLM_MASTER_KEY
+          value: "sk-1234"
+        - name: LITELLM_SALT_KEY
+          value: "sk-XXXXXXXX"
+        # Uncomment below if using a config file
+        # volumeMounts:
+        # - name: config-volume
+        #   mountPath: /app/config.yaml
+        #   subPath: litellm-config.yaml
+        # args: ["--config", "/app/config.yaml", "--port", "4000", "--num_workers", "8"]
+      # Uncomment below if using a config file
+      # volumes:
+      # - name: config-volume
+      #   configMap:
+      #     name: litellm-config
+
+---
+# litellm Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: litellm-service
+  namespace: litellm-ns
+spec:
+  selector:
+    app: litellm
+  ports:
+  - port: 4000
+    targetPort: 4000
+  type: ClusterIP
+
+---
+# Ingress for HTTP access
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: litellm-ingress
+  namespace: litellm-ns
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: web  # HTTP only
+spec:
+  rules:
+  - host: litellm.localhost
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: litellm-service
+            port:
+              number: 4000
