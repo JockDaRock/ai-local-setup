@@ -115,7 +115,7 @@ metadata:
   name: litellm-deployment
   namespace: litellm-ns
 spec:
-  replicas: 5
+  replicas: 1
   selector:
     matchLabels:
       app: litellm
